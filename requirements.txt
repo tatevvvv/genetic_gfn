@@ -6,7 +6,6 @@ numpy==1.21.2
 pathtools==0.1.2
 pickle5==0.0.12
 prompt-toolkit==3.0.38
-protobuf==3.20.1
 PyTDC==0.4.0
 PyYAML==6.0
 requests==2.27.1
