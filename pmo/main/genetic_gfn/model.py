@@ -14,7 +14,7 @@ class MultiGRU(nn.Module):
         self.embedding = nn.Embedding(voc_size, 128)
         self.gru_1 = nn.GRUCell(128, 512)
         self.gru_2 = nn.GRUCell(512, 512)
-        # self.gru_3 = nn.GRUCell(512, 512)
+        self.gru_3 = nn.GRUCell(512, 512)
         self.linear = nn.Linear(512, voc_size)
 
     def forward(self, x, h):
@@ -22,7 +22,7 @@ class MultiGRU(nn.Module):
         h_out = Variable(torch.zeros(h.size()))
         x = h_out[0] = self.gru_1(x, h[0])
         x = h_out[1] = self.gru_2(x, h[1])
-        # x = h_out[2] = self.gru_3(x, h[2])
+        x = h_out[2] = self.gru_3(x, h[2])
         x = self.linear(x)
         return x, h_out
 

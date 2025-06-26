@@ -66,10 +66,10 @@ def pretrain(restore_from=None):
                         tqdm.write(smile)
                 tqdm.write("\n{:>4.1f}% valid SMILES".format(100 * valid / len(seqs)))
                 tqdm.write("*" * 50 + "\n")
-                torch.save(Prior.rnn.state_dict(), "data/Prior_small.ckpt")
+                torch.save(Prior.rnn.state_dict(), "data/Prior.ckpt")
 
         # Save the Prior
-        torch.save(Prior.rnn.state_dict(), "data/Prior_small.ckpt")
+        torch.save(Prior.rnn.state_dict(), "data/Prior.ckpt")
 
 if __name__ == "__main__":
     pretrain()

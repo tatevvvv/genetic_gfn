@@ -22,8 +22,6 @@ import wandb
 from time import perf_counter
 
 from joblib import Parallel
-# from graph_ga_expert import GeneticOperatorHandler
-# from string_ga_expert import GeneticOperatorHandler as STONED
 
 
 def diversity(smiles):
@@ -66,7 +64,7 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
         self.oracle.assign_evaluator(oracle)
 
         path_here = os.path.dirname(os.path.realpath(__file__))
-        restore_prior_from=os.path.join(path_here, 'data/Prior_small.ckpt')
+        restore_prior_from=os.path.join(path_here, 'data/Prior.ckpt')
         restore_agent_from=restore_prior_from 
         voc = Vocabulary(init_from_file=os.path.join(path_here, "data/Voc"))
 
@@ -77,10 +75,10 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
         # Saved models are partially on the GPU, but if we dont have cuda enabled we can remap these
         # to the CPU.
         if torch.cuda.is_available():
-            Prior.rnn.load_state_dict(torch.load(os.path.join(path_here,'data/Prior_small.ckpt')))
+            Prior.rnn.load_state_dict(torch.load(os.path.join(path_here,'data/Prior.ckpt')))
             Agent.rnn.load_state_dict(torch.load(restore_agent_from))
         else:
-            Prior.rnn.load_state_dict(torch.load(os.path.join(path_here, 'data/Prior_small.ckpt'), map_location=lambda storage, loc: storage))
+            Prior.rnn.load_state_dict(torch.load(os.path.join(path_here, 'data/Prior.ckpt'), map_location=lambda storage, loc: storage))
             Agent.rnn.load_state_dict(torch.load(restore_agent_from, map_location=lambda storage, loc: storage))
 
         # We dont need gradients with respect to Prior
@@ -186,7 +184,7 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
             
             prev_n_oracles = len(self.oracle)
 
-            # Calculate augmented likelihood
+            # Calculate augmented likelihood (REINVENT)
             # augmented_likelihood = prior_likelihood.float() + 500 * Variable(score).float()
             # reinvent_loss = torch.pow((augmented_likelihood - agent_likelihood), 2)
             # print('REINVENT:', reinvent_loss.mean().item())
@@ -325,4 +323,3 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
             # results.to_pickle('./main/genetic_gfn/ga_results/run_' + oracle.name + '_results.pkl')
             tot_ga_results.to_pickle(f'./main/genetic_gfn/ga_results/run_{oracle.name}_ga_results_seed{self.seed}.pkl')
             tot_ga_results.to_csv(f'./main/genetic_gfn/ga_results/run_{oracle.name}_ga_results_seed{self.seed}.csv', index=False)
-
