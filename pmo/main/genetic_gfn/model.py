@@ -28,7 +28,7 @@ class MultiGRU(nn.Module):
 
     def init_h(self, batch_size):
         # Initial cell state is zero
-        return Variable(torch.zeros(2, batch_size, 512))
+        return Variable(torch.zeros(3, batch_size, 512))
 
 class RNN():
     """Implements the Prior and Agent RNN. Needs a Vocabulary instance in
