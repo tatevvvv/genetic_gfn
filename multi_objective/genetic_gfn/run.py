@@ -3,6 +3,13 @@ import sys
 import numpy as np
 path_here = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(path_here)
+# Ensure multi_objective/ is importable regardless of current working directory.
+# This enables imports like `from optimizer import BaseOptimizer` and `from oracle...`.
+multi_objective_dir = os.path.abspath(os.path.join(path_here, ".."))
+if multi_objective_dir not in sys.path:
+    sys.path.insert(0, multi_objective_dir)
+
+# Keep repo root on sys.path (historical behavior).
 sys.path.append('/'.join(path_here.rstrip('/').split('/')[:-2]))
 from optimizer import BaseOptimizer
 from genetic_gfn.utils import Variable, seq_to_smiles, unique
