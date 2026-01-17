@@ -16,9 +16,9 @@ Concurrency:
   Runs up to N processes in parallel and pins each process to a GPU via CUDA_VISIBLE_DEVICES.
 
 Output:
-  Requires OUT_DIR env var. Writes:
-    - results/CSVs:  $OUT_DIR/genetic_gfn/results/grid/<target>/kl_<..>/rank_<..>/
-    - logs:          $OUT_DIR/genetic_gfn/local_jobs/multi_objective_hit_grid/<run_name>.gpu<G>.log
+  Writes under a single output root directory:
+    - results/CSVs:  <out_dir>/genetic_gfn/results/grid/<target>/kl_<..>/rank_<..>/seed_<seed>/
+    - logs:          <out_dir>/genetic_gfn/local_jobs/multi_objective_hit_grid/<run_name>.gpu<G>.log
   Also uses a per-run DOCKING_TMP_DIR under the run’s output folder to avoid collisions.
 """
 
@@ -39,6 +39,9 @@ class Cell:
     target: str
     kl: float
     rank: float
+
+
+DEFAULT_OUT_DIR = "/home/molopt/results/genetic_gfn/hit"
 
 
 def abspath(p: str) -> str:
@@ -174,6 +177,7 @@ def main() -> None:
     ap.add_argument("--hparam_config", default="genetic_gfn/hparams_tune.yaml")
     ap.add_argument("--max_oracle_calls", type=int, default=3000)
     ap.add_argument("--freq_log", type=int, default=100)
+    ap.add_argument("--out_dir", type=str, default=DEFAULT_OUT_DIR, help="Root output directory for results + logs")
     ap.add_argument("--seeds", nargs="*", type=int, default=None, help="Optional explicit seed list (overrides hparam yaml seeds)")
 
     ap.add_argument("--gpu_ids", nargs="*", type=int, default=None, help="Explicit GPU ids (e.g., 0 1 2 3 4 5 6 7)")
@@ -182,10 +186,7 @@ def main() -> None:
     ap.add_argument("--poll_sec", type=float, default=2.0)
     args = ap.parse_args()
 
-    out_dir = os.environ.get("OUT_DIR")
-    if not out_dir:
-        raise ValueError("OUT_DIR env var is required (root for results + logs).")
-    out_dir = abspath(out_dir)
+    out_dir = abspath(args.out_dir)
 
     _, multi_obj_dir = dirs()
 
