@@ -8,9 +8,9 @@ It enumerates the 3x3x3 grid:
   targets (default): parp1, fa7, 5ht1b
   kl_coefficient values and rank_coefficient values from genetic_gfn/hparams_tune.yaml
 
-For each grid cell it runs:
+For each grid cell it runs ONE process per seed (default 10 seeds) using task=simple:
   python run.py genetic_gfn --objectives qed,sa,<target> --alpha_vector 1,1,1
-    --max_oracle_calls 3000 --task production --n_runs 10 --freq_log 100 --wandb disabled
+    --max_oracle_calls 3000 --task simple --seed <seed> --freq_log 100 --wandb disabled
 
 Concurrency:
   Runs up to N processes in parallel and pins each process to a GPU via CUDA_VISIBLE_DEVICES.
@@ -67,6 +67,21 @@ def parse_hparams(hparam_yaml: str) -> Tuple[List[float], List[float]]:
     return [float(x) for x in kl_vals], [float(x) for x in rank_vals]
 
 
+def parse_seeds(hparam_yaml: str) -> List[int]:
+    """
+    Optional: read seeds from the same hparam yaml (top-level key `seeds`).
+    Falls back to [0..9] if not present.
+    """
+    with open(hparam_yaml, "r") as f:
+        hp = yaml.safe_load(f) or {}
+    seeds = []
+    if isinstance(hp, dict):
+        seeds = hp.get("seeds") or []
+    if not seeds:
+        return list(range(10))
+    return [int(s) for s in seeds]
+
+
 def write_config(base_cfg: str, out_cfg: str, *, kl: float, rank: float) -> None:
     with open(base_cfg, "r") as f:
         cfg = yaml.safe_load(f) or {}
@@ -84,11 +99,11 @@ def build_cells(targets: List[str], kl_vals: List[float], rank_vals: List[float]
 def launch(
     *,
     cell: Cell,
+    seed: int,
     gpu_id: int,
     multi_obj_dir: str,
     out_dir: str,
     max_oracle_calls: int,
-    n_runs: int,
     freq_log: int,
 ) -> subprocess.Popen:
     results_root = os.path.join(out_dir, "genetic_gfn", "results")
@@ -96,8 +111,8 @@ def launch(
     os.makedirs(results_root, exist_ok=True)
     os.makedirs(logs_root, exist_ok=True)
 
-    run_name = f"{cell.target}_hit_task_kl{cell.kl}_rank{cell.rank}"
-    run_out = os.path.join(results_root, "grid", cell.target, f"kl_{cell.kl}", f"rank_{cell.rank}")
+    run_name = f"{cell.target}_hit_task_kl{cell.kl}_rank{cell.rank}_seed{seed}"
+    run_out = os.path.join(results_root, "grid", cell.target, f"kl_{cell.kl}", f"rank_{cell.rank}", f"seed_{seed}")
     os.makedirs(run_out, exist_ok=True)
 
     # Per-run docking tmp dir to avoid collisions across parallel processes
@@ -119,9 +134,9 @@ def launch(
         "--max_oracle_calls",
         str(max_oracle_calls),
         "--task",
-        "production",
-        "--n_runs",
-        str(n_runs),
+        "simple",
+        "--seed",
+        str(seed),
         "--freq_log",
         str(freq_log),
         "--wandb",
@@ -158,8 +173,8 @@ def main() -> None:
     ap.add_argument("--targets", nargs="+", default=["parp1", "fa7", "5ht1b"])
     ap.add_argument("--hparam_config", default="genetic_gfn/hparams_tune.yaml")
     ap.add_argument("--max_oracle_calls", type=int, default=3000)
-    ap.add_argument("--n_runs", type=int, default=10)
     ap.add_argument("--freq_log", type=int, default=100)
+    ap.add_argument("--seeds", nargs="*", type=int, default=None, help="Optional explicit seed list (overrides hparam yaml seeds)")
 
     ap.add_argument("--gpu_ids", nargs="*", type=int, default=None, help="Explicit GPU ids (e.g., 0 1 2 3 4 5 6 7)")
     ap.add_argument("--num_gpus", type=int, default=8, help="Used only if --gpu_ids not provided.")
@@ -179,6 +194,7 @@ def main() -> None:
         hparam_path = os.path.join(multi_obj_dir, hparam_path)
     kl_vals, rank_vals = parse_hparams(hparam_path)
     cells = build_cells(args.targets, kl_vals, rank_vals)
+    seeds = args.seeds if args.seeds else parse_seeds(hparam_path)
 
     gpu_ids = args.gpu_ids if args.gpu_ids else list(range(args.num_gpus))
     max_parallel = min(args.max_parallel, len(gpu_ids))
@@ -186,10 +202,12 @@ def main() -> None:
     print("OUT_DIR:", out_dir)
     print("MULTI_OBJECTIVE_DIR:", multi_obj_dir)
     print("NUM_CELLS:", len(cells))
+    print("SEEDS:", seeds)
     print("GPU_IDS:", gpu_ids)
     print("MAX_PARALLEL:", max_parallel)
 
-    queue: List[Cell] = list(cells)
+    # Expand to per-seed jobs
+    queue: List[Tuple[Cell, int]] = [(cell, s) for cell in cells for s in seeds]
     running: List[Tuple[subprocess.Popen, int, Cell]] = []
 
     def poll_finished():
@@ -218,17 +236,17 @@ def main() -> None:
             if not free:
                 break
             gid = free[0]
-            cell = queue.pop(0)
+            cell, seed = queue.pop(0)
             p = launch(
                 cell=cell,
+                seed=seed,
                 gpu_id=gid,
                 multi_obj_dir=multi_obj_dir,
                 out_dir=out_dir,
                 max_oracle_calls=args.max_oracle_calls,
-                n_runs=args.n_runs,
                 freq_log=args.freq_log,
             )
-            print(f"[start] gpu={gid} pid={p.pid} cell={cell}")
+            print(f"[start] gpu={gid} pid={p.pid} cell={cell} seed={seed}")
             running.append((p, gid, cell))
 
         time.sleep(args.poll_sec)

@@ -4,7 +4,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-from botorch.utils.multi_objective.hypervolume import Hypervolume
+try:
+    # Optional: only needed for hypervolume metrics/logging
+    from botorch.utils.multi_objective.hypervolume import Hypervolume
+except Exception:
+    Hypervolume = None
 from rdkit.Chem import AllChem
 from rdkit import DataStructs
 from scipy import stats
@@ -88,7 +92,12 @@ def evaluate(args, generator, rollout_worker, k):
     # top_scores = []
     top_scores = defaultdict(list)
     mean_scores = []
-    hypervolume = Hypervolume(ref_point=torch.zeros(len(args.objectives)))
+    hypervolume = None
+    if Hypervolume is not None:
+        try:
+            hypervolume = Hypervolume(ref_point=torch.zeros(len(args.objectives)))
+        except Exception:
+            hypervolume = None
     
     for weights in test_weights:
         sampled_mols = []
@@ -108,8 +117,9 @@ def evaluate(args, generator, rollout_worker, k):
         mean_scores.append(np.array(scores).mean(0))
         
         picked_scores = np.array(scores)[idx_pick]
-        weight_specific_volume = hypervolume.compute(torch.tensor(picked_scores))
-        print(f'Hypervolume w.r.t test weights {weights}: {weight_specific_volume}')
+        if hypervolume is not None:
+            weight_specific_volume = hypervolume.compute(torch.tensor(picked_scores))
+            print(f'Hypervolume w.r.t test weights {weights}: {weight_specific_volume}')
         
         for K in [10, 100]:
             scores_np = np.array(scores)
