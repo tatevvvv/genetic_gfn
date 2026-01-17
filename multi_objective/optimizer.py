@@ -1,6 +1,7 @@
 import os
 import yaml
 import random
+import shutil
 import torch
 import numpy as np
 import pandas as pd
@@ -11,7 +12,11 @@ from rdkit.Chem import Draw
 # from tdc.generation import MolGen
 import wandb
 # from main.utils.chem import *
-from botorch.utils.multi_objective.hypervolume import Hypervolume
+try:
+    # Only used for logging hypervolume; make optional so the code can run without BoTorch installed.
+    from botorch.utils.multi_objective.hypervolume import Hypervolume
+except Exception:
+    Hypervolume = None
 
 from oracle.scorer.scorer import get_scores
 from utils.metrics import compute_success, compute_diversity
@@ -35,7 +40,12 @@ class Oracle:
         # self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
         self.current_div = 1.
-        self.hypervolume = Hypervolume(ref_point=torch.zeros(len(args.objectives)))
+        self.hypervolume = None
+        if Hypervolume is not None:
+            try:
+                self.hypervolume = Hypervolume(ref_point=torch.zeros(len(args.objectives)))
+            except Exception:
+                self.hypervolume = None
         
         # Hit task tracking
         self.hit_count = 0
@@ -156,7 +166,12 @@ class Oracle:
                 pass
         
         diversity_top100 = compute_diversity(mols)
-        hv = self.hypervolume.compute(torch.tensor(scores_each))
+        hv = None
+        if self.hypervolume is not None:
+            try:
+                hv = self.hypervolume.compute(torch.tensor(scores_each))
+            except Exception:
+                hv = None
             
         self.current_div = diversity_top100
         
@@ -197,7 +212,8 @@ class Oracle:
             log_str += f'avg_top1: {avg_top1:.3f} | '
             log_str += f'avg_top10: {avg_top10:.3f} | '
             log_str += f'avg_top100: {avg_top100:.3f} | '
-            log_str += f'hv: {hv:.3f} | '
+            if hv is not None:
+                log_str += f'hv: {hv:.3f} | '
             log_str += f'div: {diversity_top100:.3f}'
         
         print(log_str)
@@ -241,10 +257,11 @@ class Oracle:
                     "avg_top1": avg_top1, 
                     "avg_top10": avg_top10, 
                     "avg_top100": avg_top100, 
-                    "hv": hv,
                     "diversity_top100": diversity_top100,
                     "n_oracle": n_calls,
                 }
+                if hv is not None:
+                    log_dict["hv"] = hv
             
             wandb.log(log_dict)
         except:
@@ -568,7 +585,34 @@ class BaseOptimizer:
             self.oracle.task_label = self.args.run_name + "_seed" + str(seed)
         else:
             self.oracle.task_label = self.model_name + "_seed" + str(seed)
-        self._optimize(oracle, config)
+        # --- Per-run docking temp directory cleanup ---
+        # Docking creates temporary ligand/pdbqt files. To avoid collisions in parallel runs and to
+        # keep the workspace clean, we route docking temp files into a per-run directory and delete
+        # it after the run finishes (best-effort).
+        output_dir_abs = os.path.abspath(self.args.output_dir)
+        desired_tmp = os.path.join(output_dir_abs, "docking_tmp", f"seed_{seed}")
+        existing_tmp = os.environ.get("DOCKING_TMP_DIR")
+        if existing_tmp:
+            docking_tmp_dir = existing_tmp
+            # Only auto-delete if it's inside this run's output dir (safety).
+            cleanup_tmp = os.path.abspath(docking_tmp_dir).startswith(output_dir_abs + os.sep) or os.path.abspath(docking_tmp_dir) == output_dir_abs
+            set_env = False
+        else:
+            docking_tmp_dir = desired_tmp
+            cleanup_tmp = True
+            set_env = True
+
+        os.makedirs(docking_tmp_dir, exist_ok=True)
+        if set_env:
+            os.environ["DOCKING_TMP_DIR"] = docking_tmp_dir
+
+        try:
+            self._optimize(oracle, config)
+        finally:
+            if cleanup_tmp:
+                shutil.rmtree(docking_tmp_dir, ignore_errors=True)
+            if set_env:
+                os.environ.pop("DOCKING_TMP_DIR", None)
         if self.args.log_results:
             self.log_result()
         self.save_result(self.model_name + "_" + str(len(oracle[0])) + "_" + str(seed))
