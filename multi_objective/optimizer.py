@@ -37,6 +37,21 @@ class Oracle:
         self.current_div = 1.
         self.hypervolume = Hypervolume(ref_point=torch.zeros(len(args.objectives)))
         
+        # Hit task tracking
+        self.hit_count = 0
+        self.is_hit_task = False  # Will be set based on objectives
+        # Constraint ranges for hit task
+        self.qed_min, self.qed_max = 0.5, 1.0
+        self.sa_min, self.sa_max = 1.0, 5.0
+        self.dock_min, self.dock_max = -20, -10
+        
+        # Hit task: CSV file for recording all molecules
+        self.hit_task_csv_file = None
+        if args and hasattr(args, 'output_dir'):
+            csv_dir = args.output_dir
+            os.makedirs(csv_dir, exist_ok=True)
+            # CSV file will be set when task_label is set
+        
     @property
     def budget(self):
         return self.max_oracle_calls
@@ -46,6 +61,36 @@ class Oracle:
 
     def sort_buffer(self):
         self.mol_buffer = dict(sorted(self.mol_buffer.items(), key=lambda kv: kv[1][0], reverse=True))
+    
+    def record(self, smiles, qed_score, sa_score, dock_score_raw):
+        """
+        Record a molecule to CSV file for hit task.
+        Format: smiles,DS,QED,SA,\n
+        
+        Args:
+            smiles: SMILES string
+            qed_score: QED score
+            sa_score: SA score
+            dock_score_raw: Raw docking score (DS)
+        """
+        if self.hit_task_csv_file is None:
+            # Initialize CSV file when first molecule is recorded
+            # Use a default name if task_label is not set yet
+            if self.task_label:
+                csv_filename = f"hit_task_molecules_{self.task_label}.csv"
+            else:
+                # Generate a unique filename based on timestamp or use default
+                import time
+                csv_filename = f"hit_task_molecules_{int(time.time())}.csv"
+            self.hit_task_csv_file = os.path.join(self.args.output_dir, csv_filename)
+            # Write header
+            os.makedirs(os.path.dirname(self.hit_task_csv_file), exist_ok=True)
+            with open(self.hit_task_csv_file, 'w') as f:
+                f.write("smiles,DS,QED,SA,\n")
+        
+        # Append molecule data
+        with open(self.hit_task_csv_file, 'a') as f:
+            f.write(f"{smiles},{dock_score_raw:.6f},{qed_score:.6f},{sa_score:.6f},\n")
 
     def save_result(self, suffix=None):
         
@@ -64,7 +109,8 @@ class Oracle:
             temp_top100 = list(self.mol_buffer.items())[:100]
             smis = [item[0] for item in temp_top100]
             scores = [item[1][0] for item in temp_top100]
-            scores_each = [item[1][-1] for item in temp_top100]
+            scores_each = [item[1][2] for item in temp_top100]  # normalized scores
+            raw_scores_each = [item[1][3] if len(item[1]) > 3 else item[1][2] for item in temp_top100]  # raw scores
             n_calls = self.max_oracle_calls
         else:
             if mols is None and scores is None:
@@ -73,19 +119,24 @@ class Oracle:
                     temp_top100 = list(self.mol_buffer.items())[:100]
                     smis = [item[0] for item in temp_top100]
                     scores = [item[1][0] for item in temp_top100]
-                    scores_each = [item[1][-1] for item in temp_top100]
+                    scores_each = [item[1][2] for item in temp_top100]  # normalized scores
+                    raw_scores_each = [item[1][3] if len(item[1]) > 3 else item[1][2] for item in temp_top100]  # raw scores
                     n_calls = len(self.mol_buffer)
                 else:
                     results = list(sorted(self.mol_buffer.items(), key=lambda kv: kv[1][1], reverse=False))[:self.max_oracle_calls]
                     temp_top100 = sorted(results, key=lambda kv: kv[1][0], reverse=True)[:100]
                     smis = [item[0] for item in temp_top100]
                     scores = [item[1][0] for item in temp_top100]
-                    scores_each = [item[1][-1] for item in temp_top100]
+                    scores_each = [item[1][2] for item in temp_top100]  # normalized scores
+                    raw_scores_each = [item[1][3] if len(item[1]) > 3 else item[1][2] for item in temp_top100]  # raw scores
                     n_calls = self.max_oracle_calls
             else:
                 # Otherwise, log the input moleucles
                 smis = [Chem.MolToSmiles(m) for m in mols]
                 n_calls = len(self.mol_buffer)
+                # For this case, we don't have scores_each, so use empty lists
+                scores_each = []
+                raw_scores_each = []
         
         # Uncomment this line if want to log top-10 moelucles figures, so as the best_mol key values.
         # temp_top10 = list(self.mol_buffer.items())[:10]
@@ -109,31 +160,93 @@ class Oracle:
             
         self.current_div = diversity_top100
         
-        print(f'{n_calls}/{self.max_oracle_calls} | '
-                f'avg_top1: {avg_top1:.3f} | '
-                f'avg_top10: {avg_top10:.3f} | '
-                f'avg_top100: {avg_top100:.3f} | '
-                # f'avg_sa: {avg_sa:.3f} | '
-                f'hv: {hv:.3f} | '
-                f'div: {diversity_top100:.3f}')
+        # Calculate hit ratio for hit task
+        hit_ratio = self.hit_count / n_calls if n_calls > 0 else 0.0
+        
+        # Extract and calculate average property values
+        log_str = f'{n_calls}/{self.max_oracle_calls} | '
+        
+        if self.is_hit_task and len(raw_scores_each) > 0:
+            # Extract QED, SA, and docking scores from raw_scores_each
+            qed_idx = self.objectives_lower.index('qed') if 'qed' in self.objectives_lower else None
+            sa_idx = self.objectives_lower.index('sa') if 'sa' in self.objectives_lower else None
+            dock_idx = None
+            docking_targets = ['parp1', 'fa7', '5ht1b', 'braf', 'jak2']
+            for i, obj_lower in enumerate(self.objectives_lower):
+                if obj_lower in docking_targets:
+                    dock_idx = i
+                    break
+            
+            # Calculate averages
+            if qed_idx is not None:
+                avg_qed = np.mean([raw_scores[qed_idx] if len(raw_scores) > qed_idx else 0.0 
+                                  for raw_scores in raw_scores_each])
+                log_str += f'avg_qed: {avg_qed:.3f} | '
+            if sa_idx is not None:
+                avg_sa = np.mean([raw_scores[sa_idx] if len(raw_scores) > sa_idx else 0.0 
+                                 for raw_scores in raw_scores_each])
+                log_str += f'avg_sa: {avg_sa:.3f} | '
+            if dock_idx is not None:
+                avg_dock = np.mean([raw_scores[dock_idx] if len(raw_scores) > dock_idx else 0.0 
+                                    for raw_scores in raw_scores_each])
+                log_str += f'avg_dock: {avg_dock:.3f} | '
+            
+            log_str += f'hits: {self.hit_count} | hit_ratio: {hit_ratio:.4f}'
+        else:
+            # For non-hit tasks, show standard metrics
+            log_str += f'avg_top1: {avg_top1:.3f} | '
+            log_str += f'avg_top10: {avg_top10:.3f} | '
+            log_str += f'avg_top100: {avg_top100:.3f} | '
+            log_str += f'hv: {hv:.3f} | '
+            log_str += f'div: {diversity_top100:.3f}'
+        
+        print(log_str)
 
         try:
-            wandb.log({
-                "avg_top1": avg_top1, 
-                "avg_top10": avg_top10, 
-                "avg_top100": avg_top100, 
-                # "auc_top1": top_auc(self.mol_buffer, 1, finish, self.freq_log, self.max_oracle_calls),
-                # "auc_top10": top_auc(self.mol_buffer, 10, finish, self.freq_log, self.max_oracle_calls),
-                # "auc_top100": top_auc(self.mol_buffer, 100, finish, self.freq_log, self.max_oracle_calls),
-                # "avg_sa": avg_sa,
-                "hv": hv,
-                "diversity_top100": diversity_top100,
-                "n_oracle": n_calls,
-                # "best_mol": wandb.Image(Draw.MolsToGridImage([Chem.MolFromSmiles(item[0]) for item in temp_top10], 
-                #           molsPerRow=5, subImgSize=(200,200), legends=[f"f = {item[1][0]:.3f}, #oracle = {item[1][1]}" for item in temp_top10]))
-            })
-            # if n_calls > 9900:
-            #     print("auc_top10:", top_auc(self.mol_buffer, 10, finish, self.freq_log, self.max_oracle_calls))
+            if self.is_hit_task and len(raw_scores_each) > 0:
+                # Log property values for hit task
+                log_dict = {
+                    "n_oracle": n_calls,
+                    "diversity_top100": diversity_top100,
+                }
+                
+                # Add property averages
+                qed_idx = self.objectives_lower.index('qed') if 'qed' in self.objectives_lower else None
+                sa_idx = self.objectives_lower.index('sa') if 'sa' in self.objectives_lower else None
+                dock_idx = None
+                docking_targets = ['parp1', 'fa7', '5ht1b', 'braf', 'jak2']
+                for i, obj_lower in enumerate(self.objectives_lower):
+                    if obj_lower in docking_targets:
+                        dock_idx = i
+                        break
+                
+                if qed_idx is not None:
+                    avg_qed = np.mean([raw_scores[qed_idx] if len(raw_scores) > qed_idx else 0.0 
+                                      for raw_scores in raw_scores_each])
+                    log_dict["avg_qed"] = avg_qed
+                if sa_idx is not None:
+                    avg_sa = np.mean([raw_scores[sa_idx] if len(raw_scores) > sa_idx else 0.0 
+                                     for raw_scores in raw_scores_each])
+                    log_dict["avg_sa"] = avg_sa
+                if dock_idx is not None:
+                    avg_dock = np.mean([raw_scores[dock_idx] if len(raw_scores) > dock_idx else 0.0 
+                                       for raw_scores in raw_scores_each])
+                    log_dict["avg_dock"] = avg_dock
+                
+                log_dict["hit_count"] = self.hit_count
+                log_dict["hit_ratio"] = hit_ratio
+            else:
+                # Standard logging for non-hit tasks
+                log_dict = {
+                    "avg_top1": avg_top1, 
+                    "avg_top10": avg_top10, 
+                    "avg_top100": avg_top100, 
+                    "hv": hv,
+                    "diversity_top100": diversity_top100,
+                    "n_oracle": n_calls,
+                }
+            
+            wandb.log(log_dict)
         except:
             pass
 
@@ -145,15 +258,126 @@ class Oracle:
     def set_objectives(self, objectives, alpha_vector):
         self.objectives = objectives
         self.weights = np.array(alpha_vector)
+        # Store lowercase version for consistent comparison
+        self.objectives_lower = [obj.lower() for obj in objectives]
+        
+        # Check if this is a hit task (qed, sa, and a docking target)
+        if len(objectives) == 3:
+            if 'qed' in self.objectives_lower and 'sa' in self.objectives_lower:
+                # Check if third objective is a docking target
+                docking_targets = ['parp1', 'fa7', '5ht1b', 'braf', 'jak2']
+                if any(target in self.objectives_lower for target in docking_targets):
+                    self.is_hit_task = True
+    
+    def _check_hit(self, qed_score, sa_score, dock_score_raw):
+        """Check if molecule satisfies all hit task constraints."""
+        qed_ok = self.qed_min <= qed_score <= self.qed_max
+        sa_ok = self.sa_min <= sa_score <= self.sa_max
+        dock_ok = self.dock_min <= dock_score_raw <= self.dock_max
+        return qed_ok and sa_ok and dock_ok
     
     def moo_evaluator(self, mol):
+        """
+        Evaluate molecule for multi-objective optimization.
+        For hit task: R(x) = DSd(x) × QED(x) × SAc(x) where all are normalized to [0, 1]
+        Otherwise: weighted sum
+        """
         scores = np.zeros(len(self.objectives))
-        # import pdb; pdb.set_trace()
-        for i, obj in enumerate(self.objectives):
-            scores[i] = get_scores(obj, [mol])[0]
-        reward = np.matmul(scores, self.weights.reshape(-1, 1))
-        # volume = hypervolume.compute(valid_scores)
-        return reward, scores
+        raw_scores = np.zeros(len(self.objectives))  # Store raw scores for hit checking
+        
+        # Get scores (normalized for hit task, raw otherwise)
+        # For hit task, we need both normalized and raw scores
+        if self.is_hit_task:
+            # Find indices for each objective type
+            qed_idx = self.objectives_lower.index('qed') if 'qed' in self.objectives_lower else None
+            sa_idx = self.objectives_lower.index('sa') if 'sa' in self.objectives_lower else None
+            dock_idx = None
+            docking_targets = ['parp1', 'fa7', '5ht1b', 'braf', 'jak2']
+            for i, obj_lower in enumerate(self.objectives_lower):
+                if obj_lower in docking_targets:
+                    dock_idx = i
+                    break
+            
+            # Get scores for each objective
+            for i, obj in enumerate(self.objectives):
+                if i == dock_idx:
+                    # For docking, get both normalized and raw in one call
+                    norm_scores, raw_scores_list = get_scores(
+                        obj, [mol], return_normalized=True, return_raw_scores=True
+                    )
+                    scores[i] = norm_scores[0]
+                    raw_scores[i] = raw_scores_list[0]
+                elif i == qed_idx:
+                    # QED: get raw score (already in [0, 1])
+                    raw_score = get_scores(obj, [mol], return_normalized=False)[0]
+                    raw_scores[i] = raw_score
+                    scores[i] = raw_score
+                elif i == sa_idx:
+                    # SA: get raw score and normalize
+                    raw_score = get_scores(obj, [mol], return_normalized=False)[0]
+                    raw_scores[i] = raw_score
+                    from oracle.scorer.scorer import normalize_sa_score
+                    scores[i] = normalize_sa_score(raw_score)
+                else:
+                    # Fallback (shouldn't happen in hit task)
+                    raw_score = get_scores(obj, [mol], return_normalized=False)[0]
+                    raw_scores[i] = raw_score
+                    scores[i] = raw_score
+        else:
+            # Standard MOO: just get raw scores
+            for i, obj in enumerate(self.objectives):
+                score = get_scores(obj, [mol], return_normalized=False)[0]
+                scores[i] = score
+                raw_scores[i] = score
+        
+        # Compute reward
+        if self.is_hit_task:
+            # Hit task: R(x) = DSd(x) × QED(x) × SAc(x)
+            # All scores should already be normalized to [0, 1]
+            reward = np.prod(scores)
+            
+            # Check if this is a hit (satisfies all constraints)
+            # Use the indices we already found above
+            qed_idx = self.objectives_lower.index('qed') if 'qed' in self.objectives_lower else None
+            sa_idx = self.objectives_lower.index('sa') if 'sa' in self.objectives_lower else None
+            dock_idx = None
+            docking_targets = ['parp1', 'fa7', '5ht1b', 'braf', 'jak2']
+            for i, obj_lower in enumerate(self.objectives_lower):
+                if obj_lower in docking_targets:
+                    dock_idx = i
+                    break
+            
+            if qed_idx is not None and sa_idx is not None and dock_idx is not None:
+                is_hit = self._check_hit(
+                    raw_scores[qed_idx], 
+                    raw_scores[sa_idx], 
+                    raw_scores[dock_idx]
+                )
+                if is_hit:
+                    self.hit_count += 1
+                
+                # Record ALL molecules to CSV for hit task (not just hits)
+                # Get SMILES from mol object
+                from rdkit import Chem
+                try:
+                    mol_smiles = Chem.MolToSmiles(mol)
+                    self.record(
+                        smiles=mol_smiles,
+                        qed_score=raw_scores[qed_idx],
+                        sa_score=raw_scores[sa_idx],
+                        dock_score_raw=raw_scores[dock_idx]
+                    )
+                except:
+                    pass  # Skip if SMILES conversion fails
+        else:
+            # Standard multi-objective: weighted sum
+            reward = np.matmul(scores, self.weights.reshape(-1, 1))
+        
+        # Return reward, normalized scores, and raw scores (for hit task)
+        if self.is_hit_task:
+            return reward, scores, raw_scores
+        else:
+            return reward, scores, scores  # For non-hit tasks, raw and normalized are the same
 
     def score_smi(self, smi):
         """
@@ -177,8 +401,9 @@ class Oracle:
             if smi in self.mol_buffer:
                 pass
             else:
-                reward, scores = self.moo_evaluator(mol)
-                self.mol_buffer[smi] = [float(reward), len(self.mol_buffer)+1, scores]
+                reward, scores, raw_scores = self.moo_evaluator(mol)
+                # Store: [reward, oracle_call_number, normalized_scores, raw_scores]
+                self.mol_buffer[smi] = [float(reward), len(self.mol_buffer)+1, scores, raw_scores]
             return self.mol_buffer[smi][0]
     
     def __call__(self, smiles_lst):
@@ -338,7 +563,11 @@ class BaseOptimizer:
         torch.cuda.manual_seed_all(seed)
         random.seed(seed)
         self.seed = seed
-        # self.oracle.task_label = self.model_name + "_" + oracle.name + "_" + str(seed)
+        # Set task_label for CSV file naming (use run_name if available, otherwise generate from seed)
+        if hasattr(self.args, 'run_name') and self.args.run_name != "default":
+            self.oracle.task_label = self.args.run_name + "_seed" + str(seed)
+        else:
+            self.oracle.task_label = self.model_name + "_seed" + str(seed)
         self._optimize(oracle, config)
         if self.args.log_results:
             self.log_result()
@@ -349,10 +578,16 @@ class BaseOptimizer:
         self.reset()
 
     def production(self, oracle, config, num_runs=5, project="production"):
-        seeds = [0, 1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
-        # seeds = [23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+        # Production seed pool (hard-coded).
+        # NOTE: Intentionally fixed to seeds 0-9 so `--n_runs 10` runs exactly these.
+        seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        if num_runs is None:
+            num_runs = len(seeds)
+
         if num_runs > len(seeds):
-            raise ValueError(f"Current implementation only allows at most {len(seeds)} runs.")
+            raise ValueError(f"Requested num_runs={num_runs} but only {len(seeds)} seeds are available/provided.")
+
         seeds = seeds[:num_runs]
         for seed in seeds:
             self.optimize(oracle, config, seed, project)

@@ -353,7 +353,8 @@ def train_generative_model(args, generator, bpath, proxy, oracle, dataset, test_
 def sample_batch(args, generator, rollout_worker, oracle=None, proxy=None, ref_mols=None, Y_bounds=None, compute_multi_objective_metric=False):
     score_succ = {'gsk3b': 0.5, 'jnk3': 0.5, 'drd2': 0.5, 
                   'chemprop_sars': 0.5, 'chemprop_hiv': 0.5, "seh": 0.5,
-                  'qed': 0.6, 'sa': 0.67}
+                  'qed': 0.6, 'sa': 0.67,
+                  'parp1': 0.5, 'fa7': 0.5, '5ht1b': 0.5, 'braf': 0.5, 'jak2': 0.5}
     if Y_bounds is None:
         Y_bounds = torch.stack([proxy.partitioning.Y.min(
                     dim=-2).values, proxy.partitioning.Y.max(dim=-2).values])

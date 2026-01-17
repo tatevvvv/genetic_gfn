@@ -1,12 +1,19 @@
 import os
 import glob
 import numpy as np
+import hashlib
 from tdc import Oracle, Evaluator
 
 from rdkit.Chem import MolFromSmiles
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
-from openbabel import pybel
+try:
+    from openbabel import pybel
+except ImportError:
+    try:
+        import pybel
+    except ImportError:
+        raise ImportError("Please install openbabel: conda install -c conda-forge openbabel or pip install openbabel-wheel")
 
 import subprocess
 import multiprocessing
@@ -144,23 +151,55 @@ def get_scores_subproc(smiles, mode):
     return scores
 
 
+def sanitize_smiles_for_filename(smiles):
+    """
+    Sanitize SMILES string for use in file paths.
+    Uses MD5 hash to create a unique, safe filename that avoids issues with
+    special characters like /, \, :, *, ?, ", <, >, |, etc.
+    """
+    # Use MD5 hash to create a unique, safe filename
+    safe_hash = hashlib.md5(smiles.encode('utf-8')).hexdigest()
+    return safe_hash
+
+
 def docking(smiles, receptor_file, box_center, box_size=[20, 20, 20], return_raw=False):
     if smiles == "":
         if return_raw:
             return -1., -1.
         return -1.0
 
-    ligand_mol_file = f"./docking/tmp/mol_{smiles}.mol"
-    ligand_pdbqt_file = f"./docking/tmp/mol_{smiles}.pdbqt"
-    docking_pdbqt_file = f"./docking/tmp/dock_{smiles}.pdbqt"
+    # Sanitize SMILES for use in file paths (avoid special chars like /, \, etc.)
+    safe_name = sanitize_smiles_for_filename(smiles)
+    ligand_mol_file = f"./docking/tmp/mol_{safe_name}.mol"
+    ligand_pdbqt_file = f"./docking/tmp/mol_{safe_name}.pdbqt"
+    docking_pdbqt_file = f"./docking/tmp/dock_{safe_name}.pdbqt"
 
     # 3D conformation of SMILES
     try:
         run_line = 'obabel -:%s --gen3D -O %s' % (smiles, ligand_mol_file)
         result = subprocess.check_output(run_line.split(), stderr=subprocess.STDOUT,
                     timeout=30, universal_newlines=True)
+    except subprocess.TimeoutExpired as e:
+        # Store error for debugging (will be caught by caller)
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            sys._docking_errors.append(f"OpenBabel timeout for {smiles[:50]}: {str(e)}")
+        if return_raw:
+            return -1., -1.
+        return -1.0
+    except subprocess.CalledProcessError as e:
+        # Store error for debugging
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            sys._docking_errors.append(f"OpenBabel failed for {smiles[:50]}: returncode={e.returncode}, stderr={e.stderr[:200] if e.stderr else 'None'}")
+        if return_raw:
+            return -1., -1.
+        return -1.0
     except Exception as e:
-        # print(e)
+        # Store error for debugging
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            sys._docking_errors.append(f"OpenBabel exception for {smiles[:50]}: {type(e).__name__}: {str(e)}")
         if return_raw:
             return -1., -1.
         return -1.0
@@ -204,8 +243,48 @@ def docking(smiles, receptor_file, box_center, box_size=[20, 20, 20], return_raw
         else:
             return reverse_sigmoid_transformation(affinity_score)
 
+    except subprocess.TimeoutExpired as e:
+        # Store error for debugging
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            sys._docking_errors.append(f"qvina02 timeout for {smiles[:50]}: {str(e)}")
+        if return_raw:
+            return -1., -1.
+        return -1.0
+    except subprocess.CalledProcessError as e:
+        # Store error for debugging - capture full output
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            # Get full error output (stderr or stdout)
+            full_output = ""
+            if e.stderr:
+                full_output = e.stderr
+            elif e.stdout:
+                full_output = e.stdout
+            else:
+                full_output = 'No error message'
+            
+            # Try to extract the actual error (skip citation messages)
+            error_lines = full_output.split('\n')
+            actual_errors = []
+            for line in error_lines:
+                if any(keyword in line.lower() for keyword in ['error', 'failed', 'cannot', 'unable', 'invalid', 'not found']):
+                    actual_errors.append(line)
+            
+            if actual_errors:
+                error_msg = '\n'.join(actual_errors[:5])  # First 5 error lines
+            else:
+                error_msg = full_output[:500]  # First 500 chars if no clear error lines
+            
+            sys._docking_errors.append(f"qvina02 failed for {smiles[:50]}: returncode={e.returncode}\nError: {error_msg}")
+        if return_raw:
+            return -1., -1.
+        return -1.0
     except Exception as e:
-        # print(e)
+        # Store error for debugging
+        import sys
+        if hasattr(sys, '_docking_errors'):
+            sys._docking_errors.append(f"Docking exception for {smiles[:50]}: {type(e).__name__}: {str(e)}")
         if return_raw:
             return -1., -1.
         return -1.0

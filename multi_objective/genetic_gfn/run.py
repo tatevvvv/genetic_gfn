@@ -7,12 +7,12 @@ sys.path.append('/'.join(path_here.rstrip('/').split('/')[:-2]))
 from optimizer import BaseOptimizer
 from genetic_gfn.utils import Variable, seq_to_smiles, unique
 from genetic_gfn.model import RNN
-from genetic_gfn.data_structs import Vocabulary, Experience,
+from genetic_gfn.data_structs import Vocabulary, Experience
 import torch
 from rdkit import Chem
 
 from joblib import Parallel
-from genetic_gfn.graph_ga_expert import GeneticOperatorHandler,
+from genetic_gfn.graph_ga_expert import GeneticOperatorHandler
 
 
 def sanitize(smiles):

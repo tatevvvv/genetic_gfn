@@ -5,6 +5,6 @@ metric:
   name: avg_auc
 parameters:
   kl_coefficient:
-    values: [0.001, 0.005, 0.0005]
+    values: [0.001]#, 0.005, 0.0005]
   rank_coefficient:
-    values: [0.01, 0.03, 0.05]
+    values: [0.01]#, 0.03, 0.05]

@@ -36,10 +36,18 @@ def diversity(smiles):
 
 
 def novelty(new_smiles, ref_smiles):
+    # Handle empty reference smiles
+    if len(ref_smiles) == 0 or len(new_smiles) == 0:
+        return 0.0, 0.0, 0.0
+    
     smiles_novelty = [min([levenshtein(d, od) for od in ref_smiles]) for d in new_smiles]
     smiles_norm_novelty = [min([levenshtein(d, od) / max(len(d), len(od)) for od in ref_smiles]) for d in new_smiles]
     evaluator = Evaluator(name = 'Novelty')
-    mol_novelty = evaluator(new_smiles, ref_smiles)
+    try:
+        mol_novelty = evaluator(new_smiles, ref_smiles)
+    except (ZeroDivisionError, ValueError):
+        # If evaluator fails (e.g., empty ref_smiles), return 0
+        mol_novelty = 0.0
     return np.mean(smiles_norm_novelty), np.mean(smiles_novelty), mol_novelty
 
 
@@ -151,9 +159,17 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
             if config['valid_only']:
                 smiles = sanitize(smiles)
             
+            # Skip if no valid smiles after sanitization
+            if len(smiles) == 0:
+                continue
+            
             eval_start = perf_counter()
             score = np.array(self.oracle(smiles))
             eval_times.append(perf_counter() - eval_start)
+            
+            # Skip if no valid scores (all molecules failed evaluation)
+            if len(score) == 0 or score.size == 0:
+                continue
 
             if self.finish:
                 print('max oracle hit')
@@ -192,7 +208,11 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
             # policy novelty
             if step > 0:
                 # import pdb; pdb.set_trace()
-                smiles_norm_novelty, smiles_novelty, mol_novelty = novelty(smiles, experience.get_elems()[0])
+                ref_smiles = experience.get_elems()[0] if len(experience.get_elems()) > 0 else []
+                if len(ref_smiles) > 0 and len(smiles) > 0:
+                    smiles_norm_novelty, smiles_novelty, mol_novelty = novelty(smiles, ref_smiles)
+                else:
+                    smiles_norm_novelty, smiles_novelty, mol_novelty = 0.0, 0.0, 0.0
                 policy_smiles_norm_novelty.append(smiles_norm_novelty)
                 policy_smiles_novelty.append(smiles_novelty)
                 policy_mol_novelty.append(mol_novelty)
@@ -200,7 +220,11 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
                 policy_smiles_norm_diversity.append(smiles_norm_div)
                 policy_smiles_diversity.append(smiles_div)
                 policy_mol_diversity.append(mol_div)
-            policy_best = np.max(score)
+            # Handle empty score array (safety check - should not reach here if check above works)
+            if score.size > 0:
+                policy_best = np.max(score)
+            else:
+                policy_best = -1.0  # Default if no valid scores
 
             # Then add new experience
             new_experience = zip(smiles, score)
@@ -224,6 +248,10 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
                     eval_start = perf_counter()
                     child_score = np.array(self.oracle(child_smis))
                     eval_times.append(perf_counter() - eval_start)
+                    
+                    # Handle empty child_score array
+                    if len(child_score) == 0:
+                        continue
                     
                     if child_score.max() > ga_best:
                         ga_best = child_score.max()
@@ -318,8 +346,12 @@ class Genetic_GFN_Optimizer(BaseOptimizer):
             pass
         
         if config['rank_coefficient'] < 0.1:
-            with open(f'./main/genetic_gfn/ga_results/run_{oracle.name}_results_seed{self.seed}.pkl', 'wb') as f:
+            # Create ga_results directory if it doesn't exist
+            ga_results_dir = os.path.join(path_here, 'ga_results')
+            os.makedirs(ga_results_dir, exist_ok=True)
+            
+            with open(os.path.join(ga_results_dir, f'run_{oracle.name}_results_seed{self.seed}.pkl'), 'wb') as f:
                 pickle.dump(results, f)
             # results.to_pickle('./main/genetic_gfn/ga_results/run_' + oracle.name + '_results.pkl')
-            tot_ga_results.to_pickle(f'./main/genetic_gfn/ga_results/run_{oracle.name}_ga_results_seed{self.seed}.pkl')
-            tot_ga_results.to_csv(f'./main/genetic_gfn/ga_results/run_{oracle.name}_ga_results_seed{self.seed}.csv', index=False)
+            tot_ga_results.to_pickle(os.path.join(ga_results_dir, f'run_{oracle.name}_ga_results_seed{self.seed}.pkl'))
+            tot_ga_results.to_csv(os.path.join(ga_results_dir, f'run_{oracle.name}_ga_results_seed{self.seed}.csv'), index=False)

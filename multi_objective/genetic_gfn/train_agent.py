@@ -93,7 +93,8 @@ def train_agent(args):
     step_score = [[], []]
     score_succ = {'gsk3b': 0.5, 'jnk3': 0.5, 'drd2': 0.5, 
                   'chemprop_sars': 0.5, 'chemprop_hiv': 0.5, "seh": 0.5,
-                  'qed': 0.6, 'sa': 0.67}
+                  'qed': 0.6, 'sa': 0.67,
+                  'parp1': 0.5, 'fa7': 0.5, '5ht1b': 0.5, 'braf': 0.5, 'jak2': 0.5}
     
     
     print("Model initialized, starting training...")

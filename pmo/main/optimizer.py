@@ -75,6 +75,7 @@ class Oracle:
         self.diversity_evaluator = tdc.Evaluator(name = 'Diversity')
         self.last_log = 0
         self.current_div = 1.
+        self.hit_rate = 0.0  # For hit task tracking
 
     @property
     def budget(self):
@@ -134,15 +135,23 @@ class Oracle:
 
         self.current_div = diversity_top100
         
+        # Calculate hit rate for hit tasks (if evaluator has hit_count attribute)
+        hit_rate_str = ""
+        hit_rate_val = 0.0
+        if hasattr(self.evaluator, 'hit_count'):
+            hit_rate_val = self.evaluator.hit_count / max(n_calls, 1)
+            self.hit_rate = hit_rate_val
+            hit_rate_str = f' | hit_rate: {hit_rate_val:.4f} ({self.evaluator.hit_count}/{n_calls})'
+        
         print(f'{n_calls}/{self.max_oracle_calls} | '
                 f'avg_top1: {avg_top1:.3f} | '
                 f'avg_top10: {avg_top10:.3f} | '
                 f'avg_top100: {avg_top100:.3f} | '
                 f'avg_sa: {avg_sa:.3f} | '
-                f'div: {diversity_top100:.3f}')
+                f'div: {diversity_top100:.3f}{hit_rate_str}')
 
         try:
-            wandb.log({
+            log_dict = {
                 "avg_top1": avg_top1, 
                 "avg_top10": avg_top10, 
                 "avg_top100": avg_top100, 
@@ -152,11 +161,16 @@ class Oracle:
                 "avg_sa": avg_sa,
                 "diversity_top100": diversity_top100,
                 "n_oracle": n_calls,
-                # "best_mol": wandb.Image(Draw.MolsToGridImage([Chem.MolFromSmiles(item[0]) for item in temp_top10], 
-                #           molsPerRow=5, subImgSize=(200,200), legends=[f"f = {item[1][0]:.3f}, #oracle = {item[1][1]}" for item in temp_top10]))
-            })
+            }
+            # Add hit rate if available
+            if hasattr(self.evaluator, 'hit_count'):
+                log_dict["hit_rate"] = hit_rate_val
+                log_dict["hit_count"] = self.evaluator.hit_count
+            wandb.log(log_dict)
             if n_calls > 9900:
                 print("auc_top10:", top_auc(self.mol_buffer, 10, finish, self.freq_log, self.max_oracle_calls))
+                if hasattr(self.evaluator, 'hit_count'):
+                    print(f"Final hit_rate: {hit_rate_val:.4f} ({self.evaluator.hit_count}/{n_calls})")
         except:
             pass
 
@@ -375,6 +389,16 @@ class BaseOptimizer:
         self.seed = seed 
         self.oracle.task_label = self.model_name + "_" + oracle.name + "_" + str(seed)
         self._optimize(oracle, config)
+        
+        # Log final hit rate for hit tasks
+        if hasattr(oracle, 'hit_count') and hasattr(self.oracle, 'hit_rate'):
+            final_hit_rate = self.oracle.hit_rate
+            final_hit_count = oracle.hit_count
+            final_oracle_calls = len(self.oracle.mol_buffer)
+            print(f"\n{'='*60}")
+            print(f"Final hit_rate: {final_hit_rate:.4f} ({final_hit_count}/{final_oracle_calls})")
+            print(f"{'='*60}\n")
+        
         if self.args.log_results:
             self.log_result()
         self.save_result(self.model_name + "_" + oracle.name + "_" + str(seed))

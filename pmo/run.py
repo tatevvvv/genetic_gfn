@@ -108,7 +108,14 @@ def main():
             except:
                 config_default = yaml.safe_load(open(os.path.join(path_main, args.config_default)))
 
-            oracle = Oracle(name = oracle_name)
+            # Handle custom oracles (hit task for various targets)
+            if oracle_name.endswith("_hit_task"):
+                from main.hit_task_oracle import HitTaskOracle
+                # Extract target name from oracle_name (e.g., "parp1_hit_task" -> "parp1")
+                target_name = oracle_name.replace("_hit_task", "")
+                oracle = HitTaskOracle(target_name=target_name)
+            else:
+                oracle = Oracle(name = oracle_name)
             optimizer = Optimizer(args=args)
 
             if args.task == "simple":
@@ -135,7 +142,15 @@ def main():
         except:
             config_tune = yaml.safe_load(open(os.path.join(path_main, args.config_tune)))
 
-        oracles = [Oracle(name = oracle_name) for oracle_name in args.oracles]
+        # Handle custom oracles (hit task for various targets)
+        oracles = []
+        for oracle_name in args.oracles:
+            if oracle_name.endswith("_hit_task"):
+                from main.hit_task_oracle import HitTaskOracle
+                target_name = oracle_name.replace("_hit_task", "")
+                oracles.append(HitTaskOracle(target_name=target_name))
+            else:
+                oracles.append(Oracle(name = oracle_name))
         optimizer = Optimizer(args=args)
         
         optimizer.hparam_tune(oracles=oracles, hparam_space=config_tune, hparam_default=config_default, count=args.n_runs)
