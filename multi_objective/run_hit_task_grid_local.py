@@ -27,9 +27,11 @@ import os
 import subprocess
 import sys
 import time
+import datetime
+import traceback
 from dataclasses import dataclass
 from itertools import product
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import yaml
 
@@ -106,6 +108,7 @@ def launch(
     gpu_id: int,
     multi_obj_dir: str,
     out_dir: str,
+    run_date_dir: str,
     max_oracle_calls: int,
     freq_log: int,
 ) -> subprocess.Popen:
@@ -116,7 +119,7 @@ def launch(
 
     run_name = f"{cell.target}_hit_task_kl{cell.kl}_rank{cell.rank}_seed{seed}"
     # Flat output directory: filenames (run_name + seed suffixes) encode settings.
-    run_out = os.path.join(results_root, "hit_task_grid")
+    run_out = os.path.join(results_root, "hit_task_grid", run_date_dir)
     os.makedirs(run_out, exist_ok=True)
 
     base_cfg = os.path.join(multi_obj_dir, "genetic_gfn", "hparams_default.yaml")
@@ -151,7 +154,8 @@ def launch(
         cfg_out,
     ]
 
-    log_path = os.path.join(logs_root, f"{run_name}.gpu{gpu_id}.log")
+    log_path = os.path.join(logs_root, run_date_dir, f"{run_name}.gpu{gpu_id}.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     # Line-buffer the log file to make progress visible immediately.
     log_f = open(log_path, "w", buffering=1)
 
@@ -169,6 +173,7 @@ def launch(
     p = subprocess.Popen(cmd, cwd=multi_obj_dir, env=env, stdout=log_f, stderr=subprocess.STDOUT)
     p._log_f = log_f  # type: ignore[attr-defined]
     p._log_path = log_path  # type: ignore[attr-defined]
+    p._run_name = run_name  # type: ignore[attr-defined]
     return p
 
 
@@ -191,6 +196,12 @@ def main() -> None:
 
     _, multi_obj_dir = dirs()
 
+    # Date folder to group results/logs by day (and time to avoid collisions if you run multiple times/day)
+    now = datetime.datetime.now()
+    run_date_dir = now.strftime("%Y-%m-%d")
+    run_time_tag = now.strftime("%H%M%S")
+    run_date_dir = f"{run_date_dir}_{run_time_tag}"
+
     hparam_path = args.hparam_config
     if not os.path.isabs(hparam_path):
         hparam_path = os.path.join(multi_obj_dir, hparam_path)
@@ -207,53 +218,151 @@ def main() -> None:
     print("SEEDS:", seeds)
     print("GPU_IDS:", gpu_ids)
     print("MAX_PARALLEL:", max_parallel)
+    print("RUN_DATE_DIR:", run_date_dir)
+
+    # Scheduler logs + summary
+    results_root = os.path.join(out_dir, "genetic_gfn", "results", "hit_task_grid", run_date_dir)
+    logs_root = os.path.join(out_dir, "genetic_gfn", "local_jobs", "multi_objective_hit_grid", run_date_dir)
+    os.makedirs(results_root, exist_ok=True)
+    os.makedirs(logs_root, exist_ok=True)
+    scheduler_log_path = os.path.join(logs_root, "scheduler.log")
+    summary_csv_path = os.path.join(logs_root, "runs_summary.csv")
+
+    def slog(msg: str) -> None:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}"
+        print(line, flush=True)
+        with open(scheduler_log_path, "a") as f:
+            f.write(line + "\n")
+
+    def append_summary(
+        *,
+        run_name: str,
+        cell: Cell,
+        seed: int,
+        gpu_id: int,
+        pid: Optional[int],
+        start_ts: float,
+        end_ts: float,
+        return_code: Optional[int],
+        signal: Optional[int],
+        log_path: str,
+    ) -> None:
+        # Write one CSV row and flush immediately (so we keep a record even if the scheduler dies).
+        with open(summary_csv_path, "a") as f:
+            f.write(
+                f"{run_name},{cell.target},{cell.kl},{cell.rank},{seed},{gpu_id},{pid if pid is not None else ''},"
+                f"{start_ts:.3f},{end_ts:.3f},{return_code if return_code is not None else ''},"
+                f"{signal if signal is not None else ''},{log_path}\n"
+            )
+            f.flush()
+
+    if not os.path.exists(summary_csv_path):
+        with open(summary_csv_path, "w") as f:
+            f.write("run_name,target,kl,rank,seed,gpu_id,pid,start_time,end_time,return_code,signal,log_path\n")
 
     # Expand to per-seed jobs
     queue: List[Tuple[Cell, int]] = [(cell, s) for cell in cells for s in seeds]
-    running: List[Tuple[subprocess.Popen, int, Cell]] = []
+    running: List[Tuple[subprocess.Popen, int, Cell, int, float]] = []  # (proc, gpu, cell, seed, start_ts)
 
     def poll_finished():
         nonlocal running
-        still = []
-        for p, gid, cell in running:
-            rc = p.poll()
-            if rc is None:
-                still.append((p, gid, cell))
-                continue
-            try:
-                p._log_f.flush()  # type: ignore[attr-defined]
-                p._log_f.close()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            status = "OK" if rc == 0 else f"FAIL({rc})"
-            print(f"[done] {status} gpu={gid} cell={cell} log={getattr(p, '_log_path', '')}")
-        running = still
+        try:
+            still = []
+            for p, gid, cell, seed, start_ts in running:
+                rc = p.poll()
+                if rc is None:
+                    still.append((p, gid, cell, seed, start_ts))
+                    continue
+
+                try:
+                    p._log_f.flush()  # type: ignore[attr-defined]
+                    p._log_f.close()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+
+                end_ts = time.time()
+                sig: Optional[int] = None
+                if isinstance(rc, int) and rc < 0:
+                    sig = -rc
+
+                status = "OK" if rc == 0 else f"FAIL(rc={rc})"
+                log_path = getattr(p, "_log_path", "")
+                run_name = getattr(p, "_run_name", f"{cell.target}_seed{seed}")
+                slog(f"[done] {status} gpu={gid} pid={p.pid} run={run_name}")
+
+                append_summary(
+                    run_name=run_name,
+                    cell=cell,
+                    seed=seed,
+                    gpu_id=gid,
+                    pid=p.pid,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    return_code=rc,
+                    signal=sig,
+                    log_path=log_path,
+                )
+
+                # If there's no useful stdout, common causes are SIGKILL (OOM killer) or external preemption.
+                if rc != 0 and sig in (9, 15):
+                    slog(
+                        f"[hint] run={run_name} ended by signal {sig}. If the log has no traceback, check OOM killer / system logs:\n"
+                        f"       - dmesg -T | tail -200\n"
+                        f"       - journalctl -k --since '1 hour ago' | tail -200\n"
+                        f"       - nvidia-smi (GPU resets/ECC)\n"
+                    )
+
+            running = still
+        except Exception as e:
+            # Never let scheduler die due to a logging/inspection issue.
+            slog("[scheduler-error] poll_finished exception:\n" + traceback.format_exc())
 
     while queue or running:
         poll_finished()
 
         while queue and len(running) < max_parallel:
-            used = {gid for _, gid, _ in running}
+            used = {gid for _, gid, _, _, _ in running}
             free = [g for g in gpu_ids if g not in used]
             if not free:
                 break
             gid = free[0]
             cell, seed = queue.pop(0)
-            p = launch(
-                cell=cell,
-                seed=seed,
-                gpu_id=gid,
-                multi_obj_dir=multi_obj_dir,
-                out_dir=out_dir,
-                max_oracle_calls=args.max_oracle_calls,
-                freq_log=args.freq_log,
-            )
-            print(f"[start] gpu={gid} pid={p.pid} cell={cell} seed={seed}")
-            running.append((p, gid, cell))
+            # Record start time before launching so failures still get accounted for.
+            start_ts = time.time()
+            run_name = f"{cell.target}_hit_task_kl{cell.kl}_rank{cell.rank}_seed{seed}"
+            try:
+                p = launch(
+                    cell=cell,
+                    seed=seed,
+                    gpu_id=gid,
+                    multi_obj_dir=multi_obj_dir,
+                    out_dir=out_dir,
+                    run_date_dir=run_date_dir,
+                    max_oracle_calls=args.max_oracle_calls,
+                    freq_log=args.freq_log,
+                )
+                slog(f"[start] gpu={gid} pid={p.pid} run={getattr(p, '_run_name', run_name)} cell={cell} seed={seed}")
+                running.append((p, gid, cell, seed, start_ts))
+            except Exception:
+                end_ts = time.time()
+                slog(f"[launch-failed] gpu={gid} run={run_name} cell={cell} seed={seed}\n" + traceback.format_exc())
+                append_summary(
+                    run_name=run_name,
+                    cell=cell,
+                    seed=seed,
+                    gpu_id=gid,
+                    pid=None,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    return_code=None,
+                    signal=None,
+                    log_path="",
+                )
 
         time.sleep(args.poll_sec)
 
-    print("All runs finished.")
+    slog("All runs finished.")
 
 
 if __name__ == "__main__":
