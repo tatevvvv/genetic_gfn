@@ -17,7 +17,7 @@ Concurrency:
 
 Output:
   Writes under a single output root directory:
-    - results/CSVs:  <out_dir>/genetic_gfn/results/grid/<target>/kl_<..>/rank_<..>/seed_<seed>/
+    - results/CSVs:  <out_dir>/genetic_gfn/results/hit_task_grid/   (flat output dir; filenames encode settings)
     - logs:          <out_dir>/genetic_gfn/local_jobs/multi_objective_hit_grid/<run_name>.gpu<G>.log
   Also uses a per-run DOCKING_TMP_DIR under the run’s output folder to avoid collisions.
 """
@@ -115,19 +115,18 @@ def launch(
     os.makedirs(logs_root, exist_ok=True)
 
     run_name = f"{cell.target}_hit_task_kl{cell.kl}_rank{cell.rank}_seed{seed}"
-    run_out = os.path.join(results_root, "grid", cell.target, f"kl_{cell.kl}", f"rank_{cell.rank}", f"seed_{seed}")
+    # Flat output directory: filenames (run_name + seed suffixes) encode settings.
+    run_out = os.path.join(results_root, "hit_task_grid")
     os.makedirs(run_out, exist_ok=True)
 
-    # Per-run docking tmp dir to avoid collisions across parallel processes
-    docking_tmp_dir = os.path.join(run_out, "docking_tmp")
-    os.makedirs(docking_tmp_dir, exist_ok=True)
-
     base_cfg = os.path.join(multi_obj_dir, "genetic_gfn", "hparams_default.yaml")
-    cfg_out = os.path.join(run_out, f"hparams_kl_{cell.kl}_rank_{cell.rank}.yaml")
+    cfg_out = os.path.join(run_out, f"hparams_{run_name}.yaml")
     write_config(base_cfg, cfg_out, kl=cell.kl, rank=cell.rank)
 
     cmd = [
+        # Unbuffered stdout/stderr so log files update in real time
         sys.executable,
+        "-u",
         "run.py",
         "genetic_gfn",
         "--objectives",
@@ -153,15 +152,17 @@ def launch(
     ]
 
     log_path = os.path.join(logs_root, f"{run_name}.gpu{gpu_id}.log")
-    log_f = open(log_path, "w")
+    # Line-buffer the log file to make progress visible immediately.
+    log_f = open(log_path, "w", buffering=1)
 
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    env["DOCKING_TMP_DIR"] = docking_tmp_dir
+    env["PYTHONUNBUFFERED"] = "1"
+    # Do NOT set DOCKING_TMP_DIR here; multi_objective/optimizer.py will set a per-run temp dir
+    # based on task_label and delete it after the run finishes.
 
     log_f.write(f"CWD: {multi_obj_dir}\n")
     log_f.write(f"CUDA_VISIBLE_DEVICES: {env['CUDA_VISIBLE_DEVICES']}\n")
-    log_f.write(f"DOCKING_TMP_DIR: {env['DOCKING_TMP_DIR']}\n")
     log_f.write("CMD: " + " ".join(cmd) + "\n\n")
     log_f.flush()
 

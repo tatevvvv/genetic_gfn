@@ -590,7 +590,9 @@ class BaseOptimizer:
         # keep the workspace clean, we route docking temp files into a per-run directory and delete
         # it after the run finishes (best-effort).
         output_dir_abs = os.path.abspath(self.args.output_dir)
-        desired_tmp = os.path.join(output_dir_abs, "docking_tmp", f"seed_{seed}")
+        # Use task_label (includes run_name + seed) so parallel runs with the same seed don't collide.
+        task_label = getattr(self.oracle, "task_label", f"seed_{seed}")
+        desired_tmp = os.path.join(output_dir_abs, "docking_tmp", str(task_label))
         existing_tmp = os.environ.get("DOCKING_TMP_DIR")
         if existing_tmp:
             docking_tmp_dir = existing_tmp
@@ -615,7 +617,8 @@ class BaseOptimizer:
                 os.environ.pop("DOCKING_TMP_DIR", None)
         if self.args.log_results:
             self.log_result()
-        self.save_result(self.model_name + "_" + str(len(oracle[0])) + "_" + str(seed))
+        # Use task_label to avoid overwriting when multiple runs share the same output_dir.
+        self.save_result(self.oracle.task_label)
         # self.reset()
         if self.args.wandb != 'disabled':
             run.finish()
